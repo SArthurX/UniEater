@@ -3,7 +3,10 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geoflutterfire_plus/geoflutterfire_plus.dart';
 import 'restaurant_info.dart';
+import 'add.dart';
+import 'dart:async';
 
 class Page1 extends StatefulWidget {
   const Page1({super.key});
@@ -16,11 +19,20 @@ class _Page1State extends State<Page1> {
   LocationData? currentLocation;
   final Location location = Location();
   bool _isGettingLocation = false;
+  Set<Marker> _markers = {};
+  StreamSubscription<List<DocumentSnapshot<Map<String, dynamic>>>>?
+      _streamSubscription;
 
   @override
   void initState() {
     super.initState();
     _checkLocationPermission();
+  }
+
+  @override
+  void dispose() {
+    _streamSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _checkLocationPermission() async {
@@ -32,7 +44,6 @@ class _Page1State extends State<Page1> {
       if (requestPermissionStatus == PermissionStatus.granted) {
         _getLocation();
       } else {
-        //TODO: Handle the case when permission is denied
         print('Location permission denied');
       }
     }
@@ -41,39 +52,51 @@ class _Page1State extends State<Page1> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add_location),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const AddLocationPage()),
+              );
+            },
+          ),
+        ],
+      ),
       body: _isGettingLocation
           ? const Center(child: CircularProgressIndicator())
           : currentLocation == null
-              ? const Center(child: Text('Unable to get location'))
-              : FutureBuilder<Set<Marker>>(
-                  future: _createMarkers(),
-                  builder: (context, snapshot) {
-                    print("ConnectionState: ${snapshot.connectionState}");
-                    if (snapshot.hasError) {
-                      print("Error: ${snapshot.error}");
-                    }
-
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(
-                          child: CircularProgressIndicator()); //waiting
-                    } else if (snapshot.hasData) {
-                      return GoogleMap(
-                        onMapCreated: (GoogleMapController controller) =>
-                            mapController = controller,
-                        initialCameraPosition: CameraPosition(
-                          target: LatLng(currentLocation!.latitude!,
-                              currentLocation!.longitude!),
-                          zoom: 14.0,
-                        ),
-                        myLocationEnabled: true,
-                        myLocationButtonEnabled: false,
-                        markers: snapshot.data ?? {},
-                      );
-                    } else {
-                      return const Center(
-                          child: Text('Failed to load markers'));
-                    }
+              ? const Center(child: Text('无法获取当前位置'))
+              : GoogleMap(
+                  onMapCreated: (GoogleMapController controller) {
+                    mapController = controller;
                   },
+                  initialCameraPosition: CameraPosition(
+                    target: LatLng(currentLocation!.latitude!,
+                        currentLocation!.longitude!),
+                    zoom: 14.0,
+                  ),
+                  myLocationEnabled: true,
+                  myLocationButtonEnabled: false,
+                  onCameraIdle: () async {
+                    LatLngBounds bounds =
+                        await mapController.getVisibleRegion();
+                    LatLng center = LatLng(
+                      (bounds.northeast.latitude + bounds.southwest.latitude) /
+                          2,
+                      (bounds.northeast.longitude +
+                              bounds.southwest.longitude) /
+                          2,
+                    );
+
+                    _setCenterMarker(center);
+
+                    _createMarkers(center, 1);
+                  },
+                  markers: _markers,
                 ),
     );
   }
@@ -89,7 +112,20 @@ class _Page1State extends State<Page1> {
     });
   }
 
-  //navigate to google maps
+  void _setCenterMarker(LatLng center) {
+    setState(() {
+      _markers.add(
+        Marker(
+          markerId: const MarkerId('center_marker'),
+          position: center,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+          infoWindow: const InfoWindow(title: '中心'),
+        ),
+      );
+    });
+  }
+
+  // 打开导航到 Google Maps
   Future<void> _launchMaps(String address) async {
     final Uri googleMapsUrl = Uri.parse('comgooglemaps://?daddr=$address');
     final Uri webUrl = Uri.parse('https://www.google.com/maps/dir//$address');
@@ -98,12 +134,17 @@ class _Page1State extends State<Page1> {
     } else if (await canLaunchUrl(webUrl)) {
       await launchUrl(webUrl);
     } else {
-      throw Exception('Could not launch $googleMapsUrl or $webUrl');
+      throw Exception('無法開啟 $googleMapsUrl/$webUrl');
     }
   }
 
   void _showBottomSheet(
-      BuildContext context, String title, String timings, String address) {
+    BuildContext context,
+    String title,
+    String timings,
+    String address,
+    String restaurantId,
+  ) {
     showModalBottomSheet(
       context: context,
       builder: (BuildContext context) {
@@ -122,7 +163,8 @@ class _Page1State extends State<Page1> {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                              builder: (context) => restaurant_info()),
+                              builder: (context) =>
+                                  restaurant_info(restaurantId: restaurantId)),
                         );
                       },
                       child: Container(
@@ -182,13 +224,9 @@ class _Page1State extends State<Page1> {
                             foregroundColor: Colors.white,
                             backgroundColor:
                                 const Color.fromARGB(255, 84, 182, 217),
-
                             padding:
                                 const EdgeInsets.symmetric(horizontal: 100),
-
                             elevation: 5,
-                            // side:
-                            //     BorderSide(color: Colors.blueAccent, width: 2),
                             textStyle: const TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
@@ -232,40 +270,82 @@ class _Page1State extends State<Page1> {
     );
   }
 
-  //pin the store location
-  //TODO : ~~database~~, icon
-  Future<Set<Marker>> _createMarkers() async {
-    final storeSnapshot = await FirebaseFirestore.instance
-        .collection('university')
-        .doc('test')
-        .collection('stores')
-        .doc('store_test')
-        .get();
+  void _createMarkers(LatLng center, double radiusInKm) {
+    final CollectionReference<Map<String, dynamic>> collectionReference =
+        FirebaseFirestore.instance.collection('university');
 
-    final storeData = storeSnapshot.data();
+    GeoFirePoint centerPoint = GeoFirePoint(
+      GeoPoint(center.latitude, center.longitude),
+    );
 
-    if (storeData != null) {
-      return {
-        Marker(
-          markerId: MarkerId(storeData['name']),
-          position: LatLng(storeData['latitude'], storeData['longitude']),
-          infoWindow: InfoWindow(
-            title: storeData['name'],
-            snippet: storeData['description'],
-          ),
-          onTap: () {
-            _showBottomSheet(
-              context,
-              storeData['name'],
-              storeData['hours'],
-              storeData['address'],
-            );
-          },
-        ),
-      };
-    } else {
-      print("No document found");
-      return {};
-    }
+    print(
+        'Querying with center: ${center.latitude}, ${center.longitude}, radius: $radiusInKm km');
+
+    Stream<List<DocumentSnapshot<Map<String, dynamic>>>> stream =
+        GeoCollectionReference<Map<String, dynamic>>(collectionReference)
+            .subscribeWithin(
+      center: centerPoint,
+      radiusInKm: radiusInKm,
+      field: 'geo',
+      geopointFrom: (data) {
+        if (data['geo'] is Map<String, dynamic> &&
+            data['geo']['geopoint'] is GeoPoint) {
+          return data['geo']['geopoint'] as GeoPoint;
+        }
+        print('Warning: Unexpected geo data structure for document');
+        return GeoPoint(0, 0);
+      },
+      strictMode: true,
+    );
+
+    _streamSubscription?.cancel();
+
+    _streamSubscription = stream.listen((documentList) {
+      print('Received ${documentList.length} documents');
+      Set<Marker> markers = {};
+
+      for (var doc in documentList) {
+        final storeData = doc.data();
+        if (storeData == null) continue;
+
+        print('Document found: ${doc.id}, Data: $storeData');
+
+        if (storeData['geo'] != null && storeData['name'] != null) {
+          final geoData = storeData['geo'] as Map<String, dynamic>;
+          final geoPoint = geoData['geopoint'] as GeoPoint;
+          markers.add(
+            Marker(
+              markerId: MarkerId(storeData['name']),
+              position: LatLng(geoPoint.latitude, geoPoint.longitude),
+              infoWindow: InfoWindow(
+                title: storeData['name'],
+                snippet: storeData['description'] ?? '',
+              ),
+              onTap: () {
+                _showBottomSheet(
+                    context,
+                    storeData['name'],
+                    storeData['hours']["${DateTime.now().weekday}"] ??
+                        'Hours not available',
+                    storeData['address'] ?? 'Address not available',
+                    doc.id);
+              },
+            ),
+          );
+          print('Added marker for ${storeData['name']}');
+        } else {
+          print('Error: Missing required data fields for document ${doc.id}');
+        }
+      }
+
+      setState(() {
+        _markers = {
+          ..._markers
+              .where((marker) => marker.markerId == MarkerId('center_marker')),
+          ...markers,
+        };
+      });
+      print('Updated markers with ${markers.length} markers');
+    });
   }
 }

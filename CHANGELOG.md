@@ -1,3 +1,13 @@
+## [0.0.5] - 2024-08-27/S
+## Change
+* replace paging ues IndexedStack
+
+
+## [0.0.4] - 2024-08-27/S
+## Add
+* add geo_firestore for filtering
+
+
 ## [0.0.3] - 2024-08-26/S
 ## Add
 * firebase database
